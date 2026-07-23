@@ -20,10 +20,10 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.0",
-    "langchain>=0.3.0",
-    "langchain-anthropic>=0.3.0",
-    "langchain-core>=0.3.0",
+    # Answer generation is a typed Pydantic AI agent (replaces the langchain ChatAnthropic chain).
+    "pydantic-ai>=1.0,<2",
+    "pydantic>=2.7,<3",
+    "python-dotenv>=1.0,<2",
     "sentence-transformers>=3.0",
     "faiss-cpu>=1.8.0",
     "rank-bm25>=0.2.2",

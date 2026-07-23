@@ -68,10 +68,14 @@ class RAGEngine:
         dense_weight: float = 0.6,
         sparse_weight: float = 0.4,
         device: str = "auto",
+        llm_model: str | None = None,
     ):
+        from ..config import MODEL
+
         self.index_path = Path(index_path)
-        self.model_name = model_name
+        self.model_name = model_name  # embedder
         self.reranker_name = reranker_name
+        self.model = llm_model or MODEL  # Pydantic AI model string for answer generation
         self.dense_weight = dense_weight
         self.sparse_weight = sparse_weight
         self.device = self._resolve_device(device)
@@ -240,13 +244,9 @@ class RAGEngine:
 
         retrieval_time = (time.perf_counter() - t0) * 1000
 
-        # Generation phase
+        # Generation phase — bounded judgement over the retrieved chunks (Pydantic AI).
         t1 = time.perf_counter()
-        context = "\n\n".join(
-            f"[Source: {c['document']}, p.{c['page']}]\n{c['chunk_text']}"
-            for c in candidates
-        )
-        answer = self._generate_answer(question, context)
+        grounded = self._answer(question, candidates)
         generation_time = (time.perf_counter() - t1) * 1000
 
         # Build traceable sources
@@ -262,34 +262,54 @@ class RAGEngine:
         ]
 
         return RAGResult(
-            answer=answer,
+            answer=grounded.answer,
             sources=sources,
+            # Confidence stays grounded in retrieval scores; the model's self-assessment is metadata.
             confidence=self._compute_confidence(candidates),
             retrieval_time_ms=retrieval_time,
             generation_time_ms=generation_time,
             query=question,
+            metadata={
+                "cited_source_ids": [c.source_id for c in grounded.citations],
+                "insufficient_context": grounded.insufficient_context,
+                "safety_critical": grounded.safety_critical,
+                "model_confidence": grounded.confidence,
+            },
         )
 
-    def _generate_answer(self, question: str, context: str) -> str:
-        """Generate answer using LLM with manufacturing-specific prompt."""
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.prompts import ChatPromptTemplate
+    def _answer(self, question: str, candidates: list[dict]):
+        """Run the typed Pydantic AI answer agent, safely from sync or async callers.
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "You are a manufacturing equipment expert. Answer questions using ONLY "
-                "the provided context. If the context doesn't contain enough information, "
-                "say so clearly. Always reference the source document and page number. "
-                "Prioritize safety-critical information. Respond in the same language as "
-                "the question (Greek or English)."
-            )),
-            ("human", "Context:\n{context}\n\nQuestion: {question}"),
-        ])
+        `query()` is sync but is invoked from an async FastAPI endpoint, so an event loop may
+        already be running — in that case run the agent's coroutine on a worker thread rather than
+        calling `asyncio.run` (which would raise inside a running loop).
+        """
+        from .answer import GroundedAnswer, run_answer_agent
 
-        llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
-        chain = prompt | llm
-        response = chain.invoke({"context": context, "question": question})
-        return response.content
+        async def _coro():
+            return await run_answer_agent(question, candidates, model=self.model)
+
+        try:
+            import asyncio
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_coro())
+
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                return ex.submit(lambda: asyncio.run(_coro())).result()
+        except Exception as e:  # never let a generation failure sink the whole query
+            logger.exception("Answer generation failed: %s", e)
+            return GroundedAnswer(
+                answer="Answer generation is unavailable right now.",
+                citations=[],
+                insufficient_context=True,
+                safety_critical=False,
+                confidence=0.0,
+            )
 
     @staticmethod
     def _compute_confidence(candidates: list[dict]) -> float:

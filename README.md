@@ -24,7 +24,7 @@ SmartFactory-RAG combines three AI capabilities into one system:
 
 | Module | What it does | Tech |
 |--------|-------------|------|
-| **RAG Engine** | Natural-language Q&A over equipment manuals, SOPs, safety docs | LangChain · FAISS · BGE embeddings |
+| **RAG Engine** | Natural-language Q&A over equipment manuals, SOPs, safety docs | **Pydantic AI** (typed, grounded answers) · FAISS + BM25 · BGE-M3 |
 | **Predictive Maintenance** | Forecasts failures from live sensor streams | LSTM · LightGBM · ensemble voting |
 | **Sensor Fusion API** | Ingests, normalizes, and routes real-time telemetry | FastAPI · MQTT · async pipelines |
 
@@ -182,7 +182,13 @@ smart-factory-rag/
 
 ## Tech Stack
 
-**AI/ML**: LangChain, FAISS, sentence-transformers (BGE-M3), PyTorch, LightGBM, ONNX Runtime
+**AI/ML**: Pydantic AI (typed answer agent with grounded citations), FAISS + BM25 hybrid retrieval, sentence-transformers (BGE-M3), PyTorch, LightGBM, ONNX Runtime
+
+> **Grounded generation.** The answer layer is a Pydantic AI agent with `output_type=GroundedAnswer`
+> and an `@output_validator` that raises `ModelRetry` if the model cites a chunk that wasn't
+> retrieved — so on a floor where an hour of downtime costs €50k+, "I don't have enough information"
+> is a typed, auditable outcome rather than a hallucinated guess. The full answer path runs offline
+> against `TestModel` (`pytest tests/test_answer_agent.py`, 5 tests, no network).
 **Backend**: FastAPI, Pydantic v2, asyncio, MQTT (aiomqtt), SQLAlchemy
 **Data**: PostgreSQL + TimescaleDB, Redis (caching), Parquet
 **Infrastructure**: Docker, Prometheus + Grafana, structlog
